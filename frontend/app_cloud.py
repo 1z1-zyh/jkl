@@ -6,13 +6,19 @@ Streamlit Cloud 版本 - 单文件集成 chains
 import streamlit as st
 import os
 from dotenv import load_dotenv
-
-from langchain.memory import ConversationBufferMemory
-from langchain.chains import LLMChain
-from langchain_openai import ChatOpenAI
+from openai import OpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, AIMessage
 
 load_dotenv()
+
+# ============== 客户端配置 ==============
+@st.cache_resource
+def get_openai_client():
+    return OpenAI(
+        api_key=os.getenv("DEEPSEEK_API_KEY"),
+        base_url=os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1"),
+    )
 
 # ============== 角色配置 ==============
 CHARACTERS = {
@@ -60,65 +66,35 @@ CHARACTERS = {
     }
 }
 
-def list_characters():
-    return [{"id": key, **value} for key, value in CHARACTERS.items()]
+# ============== Prompt 模板 ==============
+def get_system_prompt(character):
+    return f"""你现在需要扮演一个特定的角色。请严格按照以下角色设定进行对话：
 
-# ============== LLM 配置 ==============
-@st.cache_resource
-def get_llm():
-    return ChatOpenAI(
-        api_key=os.getenv("DEEPSEEK_API_KEY"),
-        base_url=os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1"),
+角色信息：
+- 姓名：{character['name']}
+- 描述：{character['description']}
+- 性格：{character['personality']}
+- 语气：{character['tone']}
+- 示例回复：{character['example_response']}
+
+请根据以上信息，以{character['name']}的身份给出合适的回复。"""
+
+# ============== 对话函数 ==============
+def chat_with_character(character_id, messages):
+    client = get_openai_client()
+    character = CHARACTERS[character_id]
+    
+    # 构建消息列表
+    system_msg = {"role": "system", "content": get_system_prompt(character)}
+    
+    response = client.chat.completions.create(
         model=os.getenv("MODEL_NAME", "deepseek-chat"),
+        messages=[system_msg] + messages,
         temperature=float(os.getenv("MODEL_TEMPERATURE", 0.7)),
         max_tokens=int(os.getenv("MODEL_MAX_TOKENS", 2048))
     )
-
-# ============== Prompt 模板 ==============
-def get_character_prompt_template():
-    template = """
-你现在需要扮演一个特定的角色。请严格按照以下角色设定进行对话：
-
-角色信息：
-- 姓名：{name}
-- 描述：{description}
-- 性格：{personality}
-- 语气：{tone}
-- 示例回复：{example_response}
-
-对话历史：
-{chat_history}
-
-用户当前问题：{user_message}
-
-请根据以上信息，以{name}的身份给出合适的回复。
-"""
-    return ChatPromptTemplate.from_messages([
-        ("system", template),
-        MessagesPlaceholder(variable_name="chat_history"),
-        ("human", "{user_message}")
-    ])
-
-# ============== Chain 创建 ==============
-def create_character_chain(character_id):
-    character = CHARACTERS.get(character_id)
-    if not character:
-        raise ValueError(f"Character {character_id} not found")
     
-    llm = get_llm()
-    prompt = get_character_prompt_template()
-    
-    memory = ConversationBufferMemory(
-        memory_key="chat_history",
-        return_messages=True
-    )
-    
-    return LLMChain(
-        llm=llm,
-        prompt=prompt,
-        memory=memory,
-        verbose=True
-    ), character
+    return response.choices[0].message.content
 
 # ============== Streamlit UI ==============
 st.set_page_config(
@@ -130,48 +106,33 @@ st.set_page_config(
 st.title("🎭 角色扮演AI助手")
 st.subheader("基于LangChain的智能对话系统（云端版本）")
 
-# 角色选择
-characters = list_characters()
-character_options = {char["name"]: char["id"] for char in characters}
+# 初始化 session_state
+if "chat_histories" not in st.session_state:
+    st.session_state.chat_histories = {}
 
-if "selected_character_id" not in st.session_state:
-    st.session_state.selected_character_id = None
-
-if "chains" not in st.session_state:
-    st.session_state.chains = {}
-
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = {}
+character_options = {char["name"]: char_id for char_id, char in CHARACTERS.items()}
 
 col1, col2 = st.columns([1, 3])
 
 with col1:
     st.sidebar.title("角色选择")
     selected_name = st.selectbox("选择一个角色", list(character_options.keys()))
+    selected_char_id = character_options[selected_name]
+    
     if st.button("开始对话"):
-        char_id = character_options[selected_name]
-        st.session_state.selected_character_id = char_id
-        if char_id not in st.session_state.chains:
-            with st.spinner("初始化角色中..."):
-                chain, character = create_character_chain(char_id)
-                st.session_state.chains[char_id] = {
-                    "chain": chain,
-                    "character": character
-                }
-        st.rerun()
+        if selected_char_id not in st.session_state.chat_histories:
+            st.session_state.chat_histories[selected_char_id] = []
 
 with col2:
-    if st.session_state.selected_character_id:
-        char_id = st.session_state.selected_character_id
-        char_data = CHARACTERS[char_id]
+    if selected_char_id in st.session_state.chat_histories:
+        char = CHARACTERS[selected_char_id]
         
-        st.header(f"与 {char_data['name']} 对话")
-        st.write(f"**角色描述:** {char_data['description']}")
-        st.write(f"**性格特点:** {char_data['personality']}")
+        st.header(f"与 {char['name']} 对话")
+        st.write(f"**角色描述:** {char['description']}")
+        st.write(f"**性格特点:** {char['personality']}")
         
         # 显示聊天历史
-        history = st.session_state.chat_history.get(char_id, [])
-        for msg in history:
+        for msg in st.session_state.chat_histories[selected_char_id]:
             with st.chat_message(msg["role"]):
                 st.write(msg["content"])
         
@@ -179,8 +140,10 @@ with col2:
         user_input = st.chat_input("请输入消息...")
         if user_input:
             # 添加用户消息
-            history.append({"role": "user", "content": user_input})
-            st.session_state.chat_history[char_id] = history
+            st.session_state.chat_histories[selected_char_id].append({
+                "role": "user", 
+                "content": user_input
+            })
             
             with st.chat_message("user"):
                 st.write(user_input)
@@ -189,32 +152,26 @@ with col2:
             with st.chat_message("assistant"):
                 with st.spinner("思考中..."):
                     try:
-                        chain_info = st.session_state.chains[char_id]
-                        chain = chain_info["chain"]
-                        character = chain_info["character"]
+                        # 将历史消息转换为 API 格式
+                        history = st.session_state.chat_histories[selected_char_id]
+                        api_messages = [
+                            {"role": msg["role"], "content": msg["content"]} 
+                            for msg in history[:-1]
+                        ]
+                        api_messages.append({"role": "user", "content": user_input})
                         
-                        response = chain.invoke({
-                            "name": character["name"],
-                            "description": character["description"],
-                            "personality": character["personality"],
-                            "tone": character["tone"],
-                            "example_response": character["example_response"],
-                            "user_message": user_input
+                        response = chat_with_character(selected_char_id, api_messages)
+                        st.write(response)
+                        
+                        # 更新历史
+                        st.session_state.chat_histories[selected_char_id].append({
+                            "role": "assistant", 
+                            "content": response
                         })
-                        
-                        # 提取响应文本
-                        if isinstance(response, dict):
-                            ai_response = response.get("text", str(response))
-                        else:
-                            ai_response = str(response)
-                        
-                        st.write(ai_response)
-                        history.append({"role": "assistant", "content": ai_response})
-                        st.session_state.chat_history[char_id] = history
                     except Exception as e:
                         st.error(f"出错了: {e}")
     else:
-        st.info("请从左侧选择一个角色开始对话")
+        st.info('请从左侧选择一个角色点击"开始对话"')
 
 # 说明信息
 st.sidebar.markdown("---")
